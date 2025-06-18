@@ -1,83 +1,205 @@
-from message_parser.message_parser import message_parser
-from datetime import datetime
+import functools
+import sys
+import re
+
+from message_formatter.message_formatter import Message_Formatter
 
 class Logger:
     instance = None
 
     @classmethod
     def init(cls, config):
-        cls.instance = cls(
+        """
+        Initializes the *single* Logger instance with configuration.
+        This must be called once at application startup.
+        """
+        if cls.instance is not None:
+            cls.instance.close()
+            cls.instance._reconfigure(config)
+        else:
+            cls.instance = cls._create_instance(config)
+
+        if not hasattr(cls, '_atexit_registered'):
+            import atexit
+            atexit.register(cls.instance.close)
+            cls._atexit_registered = True
+
+    @classmethod
+    def _create_instance(cls, config):
+        """Internal method to create a new Logger instance."""
+        return cls(
             log_file = config.get('outfile', None),
             log_level = config.get('level', 'INFO'),
-            style = config.get('style', None),
+            text_style = config.get('style', None),
             theme = config.get('theme', None),
-            timestamp_type = config.get('timestamp_type', 'datetime')
+            timestamp_type = config.get('timestamp_type', 'datetime'),
+            timestamp_left_decorator = config.get('timestamp_left_decorator', ''),
+            timestamp_right_decorator = config.get('timestamp_right_decorator', ' | ')
         )
+    
+    def _reconfigure(self, config):
+        """Reconfigures an existing Logger instance."""
+        self.log_file = config.get('outfile', self.log_file)
+        self.log_level = config.get('level', self.log_level)
+        self.text_style = config.get('style', self.text_style)
+        self.theme = config.get('theme', self.theme)
+        self.timestamp_type = config.get('timestamp_type', self.timestamp_type)
+        self.timestamp_left_decorator = config.get('timestamp_left_decorator', self.timestamp_left_decorator)
+        self.timestamp_right_decorator = config.get('timestamp_right_decorator', self.timestamp_right_decorator)
 
-    # Functionality to be implemented: logging to files, different themes.
-    def __init__(self, log_file=None, log_level="INFO", style=None,theme=None, timestamp_type="datetime"):
-        """Initialize the logger.
-        By default, log level is set to info."""
+        if self.log_file and (self._log_file_handle is None or self._log_file_handle.name != self.log_file):
+            if self._log_file_handle:
+                self._log_file_handle.close()
+            try:
+                self._log_file_handle = open(self.log_file, 'a', encoding='utf-8')
+            except IOError as e:
+                sys.stderr.write(f"ERROR: Could not open log file {self.log_file}: {e}\n")
+                self._log_file_handle = None
+        elif not self.log_file and self._log_file_handle:
+            self._log_file_handle.close()
+            self._log_file_handle = None
+
+    def __init__(self, log_file=None, log_level="INFO", text_style=None, theme=None,
+                 timestamp_type="datetime", timestamp_left_decorator="",
+                 timestamp_right_decorator=" | "):
+        """
+        Private constructor. Use Logger.init() to configure or get the singleton instance.
+        """
+        if Logger.instance is not None and Logger.instance is not self:
+            raise RuntimeError("Logger is a singleton. Use Logger.init() to configure or get the instance.")
+
         self.log_file = log_file
         self.log_level = log_level
-        self.theme = theme
-        self.style = style
-        self.log_count = 0
+        self.text_style = text_style
+        self.theme = theme # Placeholder
         self.timestamp_type = timestamp_type
+        self.timestamp_left_decorator = timestamp_left_decorator
+        self.timestamp_right_decorator = timestamp_right_decorator
+        
+        self.log_count = 0
+
+        self._log_file_handle = None
+        if self.log_file:
+            try:
+                self._log_file_handle = open(self.log_file, 'a', encoding='utf-8')
+            except IOError as e:
+                sys.stderr.write(f"ERROR: Could not open log file {self.log_file}: {e}\n")
+                self._log_file_handle = None
 
 
-    def _should_log(self, level):
-        """Check if current logging level is above or equal current log level.\n
-        For example, if current level is set to INFO, by default do not log DEBUG events."""
-        levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL", "FATAL"]
-        return levels.index(level) >= levels.index(self.log_level)
+    def _should_log(self, level_str):
+        """Check if current logging level is above or equal current log level."""
+        levels = ["DEBUG", "INFO", "NOTE", "WARN", "ERROR", "CRITICAL", "ALERT", "EMERGENCY"]
+        try:
+            return levels.index(level_str.upper()) >= levels.index(self.log_level.upper())
+        except ValueError:
+            sys.stderr.write(f"WARNING: Unknown log level '{level_str}' or configured level '{self.log_level}'. Logging anyway.\n")
+            return True
 
 
-    def _get_timestamp(self, timestamp_type):
-        """Get current timestamp. Supportted types are:\n
-        datetime - datetime, dt or 1,\n
-        runtime - runtime, rt or 2,\n
-        log number - log_number, ln or 3,\n
-        verbose - verbose, v or 4\n
-        By default prints out in datetime setting."""
-        now = datetime.now()
-        if timestamp_type == "datetime" or timestamp_type == "dt" or timestamp_type == 1:
-            return now.strftime("%Y-%m-%d %H:%M:%S") + " | "
-
-        elif timestamp_type == "runtime" or timestamp_type == "rt" or timestamp_type == 2:
-            return str(now.timestamp()) + " | "
-
-        elif timestamp_type == "log_number" or timestamp_type == "ln" or timestamp_type == 3:
+    def _log_message(self, message, level_str, include_level_formatting=True):
+        """
+        Internal method to handle message processing, formatting, and output.
+        `include_level_formatting=False` for the plain `log()` method.
+        """
+        if include_level_formatting and not self._should_log(level_str):
+            return ""
+        
+        if self.timestamp_type in ["log_number", "ln", 3, "verbose", "v", 4]:
             self.log_count += 1
-            return f"{self.log_count}" + " | "
+        
+        formatter_for_console = Message_Formatter(
+            message=message,
+            timestamp_type=self.timestamp_type,
+            timestamp_left_decorator=self.timestamp_left_decorator,
+            timestamp_right_decorator=self.timestamp_right_decorator,
+            text_style_type=self.text_style,
+            theme=self.theme
+        )
 
-        elif timestamp_type == "verbose" or timestamp_type == "v" or timestamp_type == 4:
-            self.log_count += 1
-            return now.strftime("%Y-%m-%d %H:%M:%S") + " | " + str(now.timestamp()) + " | " + f"{self.log_count}" + " | "
+        console_output_str = formatter_for_console.format_message(
+            level_str=level_str,
+            include_timestamp=True,
+            include_level_name=include_level_formatting,
+            apply_level_colors=include_level_formatting,
+            apply_text_case_style=True,
+            current_log_count=self.log_count
+        )
 
-        else:
-            return now.strftime("%Y-%m-%d %H:%M:%S") + " | "
+        formatter_for_file = Message_Formatter(
+            message=message,
+            timestamp_type=self.timestamp_type,
+            timestamp_left_decorator=self.timestamp_left_decorator,
+            timestamp_right_decorator=self.timestamp_right_decorator,
+            text_style_type=self.text_style,
+            theme=None
+        )
+
+        file_output_str_raw = formatter_for_file.format_message(
+            level_str=level_str,
+            include_timestamp=True,
+            include_level_name=include_level_formatting,
+            apply_level_colors=False,
+            apply_text_case_style=True,
+            current_log_count=self.log_count
+        )
+
+        file_output_str_clean = re.sub(r'\x1b\[[0-9;]*m', '', file_output_str_raw)
+
+        print(console_output_str)
+
+        if self._log_file_handle:
+            try:
+                self._log_file_handle.write(f"{file_output_str_clean}\n")
+                self._log_file_handle.flush()
+            except Exception as e:
+                sys.stderr.write(f"ERROR: Could not write to log file: {e}\n")
+        
+        return console_output_str
+    
+    # --- Public API for log levels ---
+    def debug(self, message): return self._log_message(message, "DEBUG")
+    def info(self, message): return self._log_message(message, "INFO")
+    def warn(self, message): return self._log_message(message, "WARN")
+    def note(self, message): return self._log_message(message, "NOTE")
+    def error(self, message): return self._log_message(message, "ERROR")
+    def critical(self, message): return self._log_message(message, "CRITICAL")
+    def alert(self, message): return self._log_message(message, "ALERT")
+    def emergency(self, message): return self._log_message(message, "EMERGENCY")
+
+    def log(self, message):
+        """
+        Outputs the message without any level-specific formatting (no level name, no level colors).
+        It still applies timestamp and the general text case style if configured for the logger.
+        """
+        return self._log_message(message, "PLAIN", include_level_formatting=False)
 
 
-    def _apply_style(self, message, style):
-        """Returns message in certain style. Supports three styles:\n
-        uppercase, lowercase, capitalized\n
-        If no style specified, passes on message unchanged."""
-        if style == "uppercase":
-            return message.upper()
-        elif style == "lowercase":
-            return message.lower()
-        elif style == "capitalized":
-            return message.capitalize()
-        else:
-            return message
+    def close(self):
+        """Closes the log file handle if open."""
+        if self._log_file_handle:
+            self._log_file_handle.close()
+            self._log_file_handle = None
 
-    def log(self, message, code="", timestamp_type=None, style=None):
-        if not self._should_log(code or self.log_level):
-            return
 
-        timestamp = self._get_timestamp(timestamp_type or self.timestamp_type)
-        message = self._apply_style(message, style or self.style)
-        log_level = code or self.log_level
-        formatted_message = message_parser(f"{timestamp} {message}", code=log_level)
-        print(formatted_message)
+_initial_logger_config = {
+    'level': 'INFO',
+    'timestamp_type': 'datetime',
+    'timestamp_left_decorator': '[',
+    'timestamp_right_decorator': ']: ',
+    'style': None, # No text case style by default
+    'outfile': None # No default file logging
+}
+Logger.init(_initial_logger_config)
+
+debug = functools.partial(Logger.instance.debug)
+info = functools.partial(Logger.instance.info)
+note = functools.partial(Logger.instance.note)
+warn = functools.partial(Logger.instance.warn)
+error = functools.partial(Logger.instance.error)
+critical = functools.partial(Logger.instance.critical)
+alert = functools.partial(Logger.instance.alert)
+emergency = functools.partial(Logger.instance.emergency)
+log = functools.partial(Logger.instance.log)
+
+configure = Logger.init
